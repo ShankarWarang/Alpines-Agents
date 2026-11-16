@@ -16,7 +16,12 @@
 import 'dotenv/config';
 import { createHmac } from 'node:crypto';
 
-const rawSecret = process.env.AGENT_GAMES_HMAC_SECRET ?? '';
+// Accept agent-specific or legacy shared secret name
+const rawSecret =
+  process.env.KEEPER_HMAC_SECRET ??
+  process.env.STEALER_HMAC_SECRET ??
+  process.env.AGENT_GAMES_HMAC_SECRET ??
+  '';
 const capturedBody = process.env.BODY ?? '';
 const capturedSig = process.env.SIG ?? '';
 

@@ -19,9 +19,9 @@ const log = createLogger('keeper');
 
 async function main(): Promise<void> {
   // -- Read environment variables ------------------------------
-  const hmacSecret = process.env.AGENT_GAMES_HMAC_SECRET;
+  const hmacSecret = process.env.KEEPER_HMAC_SECRET;
   if (!hmacSecret) {
-    throw new Error('AGENT_GAMES_HMAC_SECRET is required');
+    throw new Error('KEEPER_HMAC_SECRET is required - set it to the HMAC secret for alpines_keeper from the Agent Games dashboard');
   }
 
   const zkVerifyUrl = process.env.ZKVERIFY_API_URL;

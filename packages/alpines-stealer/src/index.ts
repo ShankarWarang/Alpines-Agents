@@ -11,9 +11,9 @@ const logger = createLogger('alpines-stealer', 'stealer.log');
 
 async function main(): Promise<void> {
   // -- Read environment --
-  const hmacSecret = process.env.AGENT_GAMES_HMAC_SECRET;
+  const hmacSecret = process.env.STEALER_HMAC_SECRET;
   if (!hmacSecret) {
-    logger.error('AGENT_GAMES_HMAC_SECRET is required');
+    logger.error('STEALER_HMAC_SECRET is required - set it to the HMAC secret for alpines_stealer from the Agent Games dashboard');
     process.exit(1);
   }
 
