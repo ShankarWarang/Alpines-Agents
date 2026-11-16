@@ -1,0 +1,22 @@
+{
+  "name": "zkverify-agent-games",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build:shared && npm run build:keeper && npm run build:stealer",
+    "build:shared": "npm run build -w packages/shared",
+    "build:keeper": "npm run build -w packages/alpines-keeper",
+    "build:stealer": "npm run build -w packages/alpines-stealer",
+    "dev:keeper": "npm run dev -w packages/alpines-keeper",
+    "dev:stealer": "npm run dev -w packages/alpines-stealer",
+    "start:keeper": "npm run start -w packages/alpines-keeper",
+    "start:stealer": "npm run start -w packages/alpines-stealer"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

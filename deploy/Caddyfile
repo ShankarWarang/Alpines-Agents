@@ -1,0 +1,29 @@
+opendesign.community {
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+
+    # Alpines Keeper - Proof Gatekeeper
+    handle_path /alpines_keeper* {
+        reverse_proxy localhost:3001 {
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    # Alpines Stealer - Steal the VFY
+    handle_path /alpines_stealer* {
+        reverse_proxy localhost:3002 {
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    # Landing page - static files
+    handle {
+        root * /opt/zkverify/public
+        try_files {path} /index.html
+        file_server
+    }
+}

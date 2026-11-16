@@ -1,0 +1,32 @@
+[Unit]
+Description=Alpines Keeper - zkVerify Proof Gatekeeper Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zkverify
+Group=zkverify
+WorkingDirectory=/opt/zkverify/packages/alpines-keeper
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=2
+MemoryMax=3G
+AllowedCPUs=0,1
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/zkverify/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpines-keeper
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/zkverify /var/log/alpines-keeper /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
