@@ -33,19 +33,29 @@ export function createServer(logger: ReturnType<typeof import('@zkverify/shared'
 
   // -- preHandler: verify inbound HMAC signature --
   app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
-    // Skip HMAC for GET (preflight / health checks)
-    if (request.method === 'GET') return;
+    // Skip HMAC for read-only methods
+    if (request.method === 'GET' || request.method === 'HEAD') return;
 
     const signature = request.headers['x-agent-games-signature'] as string | undefined;
-    const rawBody = request.rawBody;
 
-    if (!signature || rawBody === undefined) {
-      logger.warn({ url: request.url }, 'Missing HMAC signature or body');
+    if (!signature) {
+      logger.warn({ url: request.url, method: request.method }, 'Missing HMAC signature');
       return reply.code(401).send({ error: 'Missing HMAC signature' });
     }
 
-    if (!verifyHmac(rawBody, signature)) {
-      logger.warn({ url: request.url }, 'Invalid HMAC signature');
+    // rawBody undefined when content-type is not application/json - fall back to ''
+    const rawBody = request.rawBody ?? '';
+
+    const ok = verifyHmac(rawBody, signature);
+    logger.info({
+      url: request.url,
+      method: request.method,
+      sigPrefix: signature.slice(0, 20),
+      bodyLen: rawBody.length,
+      hmacOk: ok,
+    }, 'HMAC check');
+
+    if (!ok) {
       return reply.code(401).send({ error: 'Invalid HMAC signature' });
     }
   });

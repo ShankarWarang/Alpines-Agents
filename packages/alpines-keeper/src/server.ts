@@ -48,19 +48,32 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   // -- preHandler: verify inbound HMAC -------------------------
   app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
-    // Skip HMAC check for GET requests (health / preflight)
-    if (request.method === 'GET') return;
+    // Skip HMAC check for read-only methods
+    if (request.method === 'GET' || request.method === 'HEAD') return;
 
     const signature = request.headers['x-agent-games-signature'] as string | undefined;
-    const rawBody = request.rawBody;
 
-    if (!signature || rawBody === undefined) {
-      log.warn({ url: request.url }, 'Missing HMAC signature or body');
+    // No signature at all - reject
+    if (!signature) {
+      log.warn({ url: request.url, method: request.method }, 'Missing HMAC signature');
       return reply.code(401).send({ error: 'Missing HMAC signature' });
     }
 
-    if (!verifyHmac(rawBody, signature)) {
-      log.warn({ url: request.url }, 'HMAC verification failed');
+    // rawBody is undefined when content-type is not application/json;
+    // fall back to empty string so HMAC('', secret) can still match
+    const rawBody = request.rawBody ?? '';
+
+    const ok = verifyHmac(rawBody, signature);
+    // Debug log: show signature prefix + body length so we can diagnose format mismatches
+    log.info({
+      url: request.url,
+      method: request.method,
+      sigPrefix: signature.slice(0, 20),
+      bodyLen: rawBody.length,
+      hmacOk: ok,
+    }, 'HMAC check');
+
+    if (!ok) {
       return reply.code(401).send({ error: 'Invalid HMAC signature' });
     }
   });
