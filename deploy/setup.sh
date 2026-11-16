@@ -66,7 +66,7 @@ if ! command -v rapidsnark &>/dev/null; then
   mkdir -p build && cd build
   cmake .. -DCMAKE_BUILD_TYPE=Release
   cmake --build . --target prover --parallel "$(nproc)"
-  cp prover /usr/local/bin/rapidsnark
+  cp src/prover /usr/local/bin/rapidsnark
   chmod +x /usr/local/bin/rapidsnark
   cd /
   rm -rf "$RSNARK_DIR"
