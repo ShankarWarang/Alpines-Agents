@@ -30,6 +30,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const task = request.body as GatekeeperTask;
+
+      // Preflight: platform sends a signed POST with event_type='preflight'
+      // or no task_id — respond immediately with 200
+      if (!task?.task_id || task.event_type === 'preflight') {
+        log.info('Preflight POST received - responding ok');
+        return { ok: true, protocolVersion: 'v1' };
+      }
+
       log.info({ task_id: task.task_id }, 'Task received');
 
       // -- 1. Validate ------------------------------------------

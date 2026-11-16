@@ -54,7 +54,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     const signature = request.headers['x-agent-games-signature'] as string | undefined;
     const rawBody = request.rawBody;
 
-    if (!signature || !rawBody) {
+    if (!signature || rawBody === undefined) {
       log.warn({ url: request.url }, 'Missing HMAC signature or body');
       return reply.code(401).send({ error: 'Missing HMAC signature' });
     }

@@ -31,9 +31,16 @@ export function registerAgentRoute(
   app: FastifyInstance,
   logger: ReturnType<typeof createLogger>,
 ): void {
-  app.post('/', async (request, _reply): Promise<StealResponse> => {
+  app.post('/', async (request, _reply): Promise<StealResponse | { ok: boolean; protocolVersion: string }> => {
     const startTime = Date.now();
     const task = request.body as StealTask;
+
+    // Preflight: platform sends a signed POST with event_type='preflight'
+    // or no match_id - respond immediately with 200
+    if (!task?.match_id || (task as any).event_type === 'preflight') {
+      logger.info('Preflight POST received - responding ok');
+      return { ok: true, protocolVersion: 'v1' };
+    }
 
     logger.info(
       { match_id: task.match_id, turn: task.turn, total_turns: task.total_turns },
