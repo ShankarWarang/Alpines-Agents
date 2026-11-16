@@ -64,11 +64,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     const rawBody = request.rawBody ?? '';
 
     const ok = verifyHmac(rawBody, signature);
-    // Debug log: show signature prefix + body length so we can diagnose format mismatches
+    // Debug log: show FULL signature + FULL body for secret-mismatch diagnosis
+    // TODO: remove fullSig/fullBody after HMAC is confirmed working
     log.info({
       url: request.url,
       method: request.method,
-      sigPrefix: signature.slice(0, 20),
+      fullSig: signature,
+      fullBody: rawBody,
       bodyLen: rawBody.length,
       hmacOk: ok,
     }, 'HMAC check');
