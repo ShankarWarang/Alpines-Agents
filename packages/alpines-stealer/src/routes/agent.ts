@@ -9,14 +9,16 @@ import { getOrCreate } from '../engine/match-state.js';
 import { getOrCreateModel } from '../engine/opponent.js';
 import { selectAction } from '../engine/strategy.js';
 
-// Hash a string to a BigInt-compatible numeric string for circuit input
-function hashToBigInt(s: string): string {
-  let hash = 0n;
-  for (let i = 0; i < s.length; i++) {
-    hash = (hash * 31n + BigInt(s.charCodeAt(i))) % (2n ** 128n);
-  }
-  return hash.toString();
-}
+/**
+ * Our registered strategy commitment hash (SHA-256 of strategy descriptor).
+ * Registered on platform as: 0x80d45b2f63d5c6a19f0f9c812e720e1024a3f1d2e55bad50a6ec639e457cbb3e
+ * Circuit version: 1 | Policy version: 1
+ *
+ * This value is FIXED for the tournament. The platform sends it back
+ * each turn via task.strategy_hash and we include it in every ZK proof.
+ * Never change this mid-tournament - it is a binding commitment.
+ */
+const STRATEGY_COMMITMENT = '0x80d45b2f63d5c6a19f0f9c812e720e1024a3f1d2e55bad50a6ec639e457cbb3e';
 
 // Map action to circuit integer
 function actionToInt(action: StealAction): number {
@@ -78,12 +80,17 @@ export function registerAgentRoute(
       let publicSignals = undefined;
 
       try {
+        // strategy_hash: use our registered commitment (sent back by platform as task.strategy_hash).
+        // We fall back to our own constant if the platform omits it, ensuring consistency.
+        const strategyHashHex = (task.strategy_hash ?? STRATEGY_COMMITMENT).replace(/^0x/, '');
+        const strategyHashBigInt = BigInt('0x' + strategyHashHex).toString();
+
         const circuitInputs = {
           action: actionToInt(action),
           turn: task.turn,
-          match_id_hash: hashToBigInt(task.match_id),
           my_balance: task.my_balance,
-          strategy_hash: hashToBigInt(task.strategy_hash ?? 'default'),
+          opponent_balance: task.opponent_balance,
+          strategy_hash: strategyHashBigInt,
         };
 
         const result = await generateProof(circuitInputs);
