@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Stealer Commitment Fix - Run on VPS
+ * Stealer Commitment Fix - Run on VPS from /opt/zkverify
  *
- * Step 1: Figure out the correct Poseidon preimage for the stealer commitment.
- * Step 2: Test a valid proof.
- * Step 3: Print the exact agent.ts fix needed.
+ * Finds the correct Poseidon preimage for the stealer commitment,
+ * or determines if commitment is private (we can use any consistent value).
  *
  * Usage: node scripts/fix-stealer-commitment.mjs
  */
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { execSync } from 'node:child_process';
 
 const WASM = 'packages/alpines-stealer/circuits/steal.wasm';
@@ -20,127 +20,150 @@ if (!existsSync(WASM) || !existsSync(ZKEY)) {
   process.exit(1);
 }
 
-// Load snarkjs
+// ---- Load snarkjs ----
 const snarkjs = await import('snarkjs').then(m => m.default ?? m);
 
-// Load poseidon via circomlibjs (bundled with snarkjs)
+// ---- Load Poseidon ----
+// circomlibjs is installed at /opt/zkverify/node_modules/circomlibjs
+// Its package.json main points to src/index.js
 let poseidon;
-try {
-  const { buildPoseidon } = await import('circomlibjs');
-  poseidon = await buildPoseidon();
-} catch {
+const require = createRequire(import.meta.url);
+
+// Strategy: try several known import paths
+const importAttempts = [
+  async () => {
+    const m = await import('circomlibjs');
+    const fn = m.buildPoseidon ?? m.default?.buildPoseidon;
+    return await fn();
+  },
+  async () => {
+    // circomlibjs CJS require
+    const m = require('circomlibjs');
+    const fn = m.buildPoseidon ?? m.default?.buildPoseidon;
+    return await fn();
+  },
+  async () => {
+    // Try snarkjs's own poseidon from ffjavascript
+    const ff = await import('ffjavascript');
+    const bn128 = await ff.getCurveFromName('bn128');
+    // ffjavascript doesn't have poseidon directly, skip
+    throw new Error('ffjavascript has no poseidon');
+  },
+];
+
+for (const attempt of importAttempts) {
   try {
-    // circomlibjs ships with snarkjs in some versions
-    const p = await import('/opt/zkverify/node_modules/circomlibjs/src/poseidon.js');
-    poseidon = await (p.buildPoseidon ?? p.default.buildPoseidon)();
-  } catch {
-    execSync('cd /opt/zkverify && npm install circomlibjs --no-save 2>&1', { stdio: 'inherit' });
-    const { buildPoseidon } = await import('/opt/zkverify/node_modules/circomlibjs/src/poseidon.js');
-    poseidon = await buildPoseidon();
-  }
+    poseidon = await attempt();
+    if (poseidon) { console.log('Poseidon loaded OK'); break; }
+  } catch {}
+}
+
+if (!poseidon) {
+  // Install circomlibjs into /tmp and load from there
+  console.log('Installing circomlibjs to /tmp/cl...');
+  execSync('npm install circomlibjs --prefix /tmp/cl --no-save 2>&1 | tail -3', { stdio: 'inherit' });
+  const m = await import('/tmp/cl/node_modules/circomlibjs/src/poseidon.js');
+  const fn = m.buildPoseidon ?? m.default?.buildPoseidon;
+  poseidon = await fn();
+  console.log('Poseidon loaded from /tmp/cl');
 }
 
 const F = poseidon.F;
-const hash = (...args) => BigInt(F.toString(poseidon(args.map(BigInt))));
+const P = (...args) => BigInt(F.toString(poseidon(args.map(BigInt))));
 
-console.log('=== Stealer Commitment Fix ===\n');
+console.log('\n=== Stealer Commitment Solver ===\n');
 console.log(`Registered commitment: 0x${REGISTERED.toString(16)}\n`);
 
-// ---- Phase 1: Determine if commitment is PUBLIC ----
-// Try a proof that SKIPS the commitment check by using commitment=Poseidon(zeros,0)
-// and see if publicSignals includes the commitment value.
-const testHash9 = hash(0,0,0,0,0,0,0,0,0); // Poseidon([params[8]=0, salt=0])
-console.log(`Poseidon([0x8 zeros, salt=0]) = 0x${testHash9.toString(16)}`);
-
-// ---- Phase 2: Try all likely Poseidon arrangements ----
+// All candidate commitment computations (zero inputs, salt=0)
+const zeros8 = [0n,0n,0n,0n,0n,0n,0n,0n];
 const arrangements = [
-  { label: 'P([p0..p7, salt])',  commitment: hash(0,0,0,0,0,0,0,0,0), circuitSalt: 0n },
-  { label: 'P([p0..p7])',        commitment: hash(0,0,0,0,0,0,0,0),   circuitSalt: 0n },
-  { label: 'P([salt, p0..p7])', commitment: hash(0,0,0,0,0,0,0,0,0), circuitSalt: 0n }, // same value as first
-  { label: 'P([salt])',          commitment: hash(0),                  circuitSalt: 0n },
-  // Also try with commitment = registered value (see which strategyParams+salt satisfies it)
-  { label: 'registered (0x80d45b2f...) with zero params+salt',
-    commitment: REGISTERED, circuitSalt: 0n },
+  { label: 'Poseidon(params[8], salt=0) → 9 inputs',
+    commitment: P(...zeros8, 0n), salt: 0n },
+  { label: 'Poseidon(params[8]) → 8 inputs, salt separate',
+    commitment: P(...zeros8), salt: 0n },
+  { label: 'Poseidon(salt=0) → 1 input',
+    commitment: P(0n), salt: 0n },
+  { label: 'Poseidon(salt=0, params[8]) → salt first',
+    commitment: P(0n, ...zeros8), salt: 0n },
+  { label: 'Poseidon(circuitVersion=1, params[8], salt=0) → 10 inputs',
+    commitment: P(1n, ...zeros8, 0n), salt: 0n },
+  // Also try the registered value itself with zero params (checks if commitment is private)
+  { label: 'registered value (0x80d45b2f...) with zero params+salt',
+    commitment: REGISTERED, salt: 0n },
 ];
 
-console.log('\n--- Testing proof attempts ---\n');
+console.log('Computed hashes for zero inputs:');
+for (const { label, commitment } of arrangements.slice(0,-1)) {
+  console.log(`  ${label}`);
+  console.log(`    = 0x${commitment.toString(16)}`);
+  if (commitment === REGISTERED) console.log('    *** MATCHES REGISTERED! ***');
+}
 
-for (const { label, commitment, circuitSalt } of arrangements) {
+console.log('\n--- Running proof attempts ---\n');
+
+for (const { label, commitment, salt } of arrangements) {
   const inputs = {
     commitment,
     matchId:         1n,
     turnNumber:      1n,
     selfBalance:     100n,
     opponentBalance: 100n,
-    action:          2n,   // HOLD
+    action:          2n,
     amount:          0n,
     circuitVersion:  1n,
-    strategyParams:  [0n,0n,0n,0n,0n,0n,0n,0n],
-    salt:            circuitSalt,
+    strategyParams:  zeros8,
+    salt,
   };
 
   process.stdout.write(`  [?] ${label} ... `);
   try {
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(inputs, WASM, ZKEY);
     console.log('PROOF SUCCESS!');
-    console.log(`      commitment input: 0x${commitment.toString(16)}`);
-    console.log(`      publicSignals[0]: ${publicSignals[0]}`);
+    console.log(`      publicSignals: ${JSON.stringify(publicSignals)}`);
 
-    // Check if commitment appears in publicSignals (is it public?)
-    const commitInPublic = publicSignals.some(s => BigInt(s) === commitment);
-    const registeredInPublic = publicSignals.some(s => BigInt(s) === REGISTERED);
-    console.log(`      commitment in publicSignals: ${commitInPublic}`);
-    console.log(`      registered (0x80d45b2f...) in publicSignals: ${registeredInPublic}`);
-    console.log(`      full publicSignals: ${JSON.stringify(publicSignals)}`);
+    const commitInPub = publicSignals.some(s => BigInt(s) === commitment);
+    const regInPub    = publicSignals.some(s => BigInt(s) === REGISTERED);
+    console.log(`      commitment in publicSignals: ${commitInPub}`);
+    console.log(`      registered (0x80d45b2f) in publicSignals: ${regInPub}`);
 
     console.log('\n' + '='.repeat(60));
-    console.log('SOLUTION:');
+    console.log('  SOLUTION FOUND');
     console.log('='.repeat(60));
-    console.log(`  Poseidon variant: ${label}`);
-    console.log(`  commitment = 0x${commitment.toString(16)}`);
-    console.log(`  salt = ${circuitSalt}`);
-    console.log('');
+    console.log(`  Variant:    ${label}`);
+    console.log(`  commitment: 0x${commitment.toString(16)}`);
+    console.log(`  salt:       ${salt}`);
 
-    if (commitInPublic && commitment !== REGISTERED) {
-      console.log('WARNING: commitment IS a public signal!');
-      console.log('The platform will CHECK that publicSignals includes the REGISTERED commitment.');
-      console.log(`Registered: 0x${REGISTERED.toString(16)}`);
-      console.log(`Computed:   0x${commitment.toString(16)}`);
-      console.log('');
-      console.log('You need to find the PREIMAGE of the registered commitment.');
-      console.log('Since zeros+0 did not produce the registered value, the original');
-      console.log('registration used a non-zero salt or params.');
-    } else if (!commitInPublic) {
-      console.log('GOOD: commitment is PRIVATE. The platform does NOT check it against');
-      console.log('the registered value directly in publicSignals.');
-      console.log('However the platform likely checks strategy_hash == task.strategy_hash.');
-      console.log('If task.strategy_hash != this commitment, the platform may still reject.');
+    if (commitInPub && commitment !== REGISTERED) {
+      console.log('\n  IMPORTANT: commitment IS public → platform WILL check it.');
+      console.log('  Your registered commitment is 0x80d45b2f... but circuit outputs');
+      console.log(`  0x${commitment.toString(16)}.`);
+      console.log('  You need to find what (strategyParams, salt) hashes to 0x80d45b2f...');
+      console.log('  OR accept -2 penalty until you can re-register.');
+    } else if (!commitInPub) {
+      console.log('\n  GOOD: commitment is PRIVATE → platform cannot see it in publicSignals.');
+      console.log('  You can use ANY consistent (commitment, strategyParams, salt) triple.');
+      console.log('\n  Agent code fix for packages/alpines-stealer/src/routes/agent.ts:');
+      console.log('  ----------------------------------------------------------------');
+      console.log('  // Replace the commitment + salt block with:');
+      console.log(`  const commitment = ${commitment}n; // Poseidon(${label})`);
+      console.log('  const salt = 0n;  // FIXED - must stay 0 to match commitment');
+      console.log('  const strategyArray = Array(8).fill(0n);');
+      console.log('  ----------------------------------------------------------------');
     } else {
-      console.log('PERFECT: commitment IS public AND matches registered value!');
+      console.log('\n  PERFECT: commitment is public AND matches registered value!');
+      console.log('  Agent code fix: use salt=0n and strategyParams=[0..0]');
     }
-
-    console.log('\nFix for packages/alpines-stealer/src/routes/agent.ts:');
-    console.log('  Replace the commitment + salt generation with:');
-    console.log('');
-    console.log(`  // Commitment: Poseidon(${label})`);
-    console.log(`  // strategyParams = [0,0,0,0,0,0,0,0], salt = 0n (FIXED - must match preimage)`);
-    console.log(`  const commitment = ${commitment}n;  // 0x${commitment.toString(16)}`);
-    console.log(`  const salt = 0n;`);
-    console.log(`  const strategyArray = Array(8).fill(0n);`);
 
     process.exit(0);
   } catch (e) {
-    const msg = (e.message ?? String(e)).slice(0, 100).replace(/\n/g, ' ');
+    const msg = (e.message ?? String(e)).slice(0, 120).replace(/\n/g,' ');
     console.log(`FAIL: ${msg}`);
   }
 }
 
-console.log('\n=== No arrangement worked with zero inputs ===');
-console.log('The commitment 0x80d45b2f... was computed with UNKNOWN non-zero inputs.');
+console.log('\n=== No arrangement passed ===');
+console.log('The commitment 0x80d45b2f... cannot be matched with zero inputs.');
+console.log('The registration used non-zero strategyParams or salt.');
 console.log('');
-console.log('IMMEDIATE FIX: Accept -2 penalty for stealer proofs.');
-console.log('The stealer will still play correctly (FORTIFY/EXTRACT/HOLD)');
-console.log('but each turn costs -2 for missing proof.');
-console.log('');
-console.log('TO INVESTIGATE: What salt/params were used at registration?');
-console.log('Check git log for any registration script or previous .env STEALER_SALT entry.');
+console.log('Action: Stealer plays correctly but takes -2/turn for missing proof.');
+console.log('To fix permanently: check what values were used at registration time.');
