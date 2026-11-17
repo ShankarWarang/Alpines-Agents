@@ -56,9 +56,9 @@ if (wcPath) {
   }
 }
 
-// ---- Re-implement circom's exact FNV-1a 64-bit hash ----
-// From snarkjs source: circom uses FNV-1a 64-bit, returned as hex string,
-// then split into MSB/LSB for the wasm call.
+// ---- Exact circom FNV-1a 64-bit hash (from snarkjs witness_calculator.js) ----
+// setInputSignal is called as: setInputSignal(harray[0], harray[1], pos)
+// where harray[0] = low 32 bits, harray[1] = bits 32-63 of the 64-bit hash
 function fnvHash(str) {
   const uint64_max = 2n ** 64n;
   let hash = 0xCBF29CE484222325n;
@@ -66,10 +66,13 @@ function fnvHash(str) {
     hash ^= BigInt(str.charCodeAt(i));
     hash = (hash * 0x100000001B3n) % uint64_max;
   }
-  // Split into 4 x uint32 LE (how circom encodes it)
-  const lo = Number(hash & 0xFFFFFFFFn);
-  const hi = Number((hash >> 32n) & 0xFFFFFFFFn);
-  return { lo, hi, full: hash };
+  const harray = [];
+  let rem = hash;
+  for (let i = 0; i < 4; i++) {
+    harray.push(Number(rem & 0xFFFFFFFFn));
+    rem >>= 32n;
+  }
+  return { h0: harray[0], h1: harray[1], harray };
 }
 
 console.log('\n--- FNV hash test ---');
@@ -163,54 +166,44 @@ async function discoverSignals(cfg) {
   const mem32 = new Uint32Array(memory.buffer);
 
   for (const name of candidates) {
-    const { lo, hi } = fnvHash(name);
+    const { h0, h1 } = fnvHash(name);
+
+    // Write 0 field element to shared RW memory before calling setInputSignal
     writeZeroFieldElement(exp, memory);
 
-    // Try all calling conventions for setInputSignal and getInputSignalSize
     let matched = false;
 
-    // Convention 1: getInputSignalSize(hLo, hHi) -> size or throws
+    // Convention A: setInputSignal(h0, h1, pos) - exact snarkjs calling convention
     if (!matched) {
       try {
-        const size = exp.getInputSignalSize(lo, hi);
-        if (typeof size === 'number' && size > 0 && size < 10000) {
-          found.push({ name, size, conv: 'size(lo,hi)' });
-          matched = true;
-        }
+        exp.setInputSignal(h0, h1, 0);
+        let size = 1;
+        try { size = exp.getInputSignalSize(h0, h1); } catch {}
+        if (typeof size !== 'number' || size <= 0 || size > 10000) size = 1;
+        found.push({ name, size, conv: 'set(h0,h1)' });
+        matched = true;
       } catch {}
     }
-    // Convention 2: getInputSignalSize(hHi, hLo)
-    if (!matched) {
-      try {
-        const size = exp.getInputSignalSize(hi, lo);
-        if (typeof size === 'number' && size > 0 && size < 10000) {
-          found.push({ name, size, conv: 'size(hi,lo)' });
-          matched = true;
-        }
-      } catch {}
-    }
-    // Convention 3: setInputSignal(lo, hi, pos) -> no throw = signal exists
+    // Convention B: reversed h1, h0
     if (!matched) {
       try {
         writeZeroFieldElement(exp, memory);
-        exp.setInputSignal(lo, hi, 0);
-        // If we get here without exception, signal exists
-        const size = exp.getInputSignalSize?.(lo, hi) ?? exp.getInputSignalSize?.(hi, lo) ?? 1;
-        found.push({ name, size: typeof size === 'number' && size > 0 ? size : 1, conv: 'set(lo,hi,pos)' });
+        exp.setInputSignal(h1, h0, 0);
+        let size = 1;
+        try { size = exp.getInputSignalSize(h1, h0); } catch {}
+        if (typeof size !== 'number' || size <= 0 || size > 10000) size = 1;
+        found.push({ name, size, conv: 'set(h1,h0)' });
         matched = true;
-      } catch(e) {
-        if (!e.message?.startsWith('WE:')) {
-          // Not a wasm exception = snarkjs wrapper error = signal probably doesn't exist
-        }
-      }
+      } catch {}
     }
-    // Convention 4: setInputSignal(hi, lo, pos)
+    // Convention C: getInputSignalSize(h0, h1) directly
     if (!matched) {
       try {
-        writeZeroFieldElement(exp, memory);
-        exp.setInputSignal(hi, lo, 0);
-        found.push({ name, size: 1, conv: 'set(hi,lo,pos)' });
-        matched = true;
+        const size = exp.getInputSignalSize(h0, h1);
+        if (typeof size === 'number' && size > 0 && size < 10000) {
+          found.push({ name, size, conv: 'size(h0,h1)' });
+          matched = true;
+        }
       } catch {}
     }
   }
