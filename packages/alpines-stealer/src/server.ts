@@ -47,10 +47,13 @@ export function createServer(logger: ReturnType<typeof import('@zkverify/shared'
     const rawBody = request.rawBody ?? '';
 
     const ok = verifyHmac(rawBody, signature);
+    // Debug: log full sig + body for HMAC secret diagnosis
+    // TODO: remove fullSig/fullBody after HMAC is confirmed working
     logger.info({
       url: request.url,
       method: request.method,
-      sigPrefix: signature.slice(0, 20),
+      fullSig: signature,
+      fullBody: rawBody,
       bodyLen: rawBody.length,
       hmacOk: ok,
     }, 'HMAC check');
