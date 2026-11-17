@@ -1,108 +1,231 @@
 #!/usr/bin/env node
 /**
- * Auto-discover circuit input signals by passing {} and reading
- * snarkjs error messages that name each missing required signal.
+ * Fully automated circuit signal discovery.
+ *
+ * How it works:
+ *   1. Instantiate wasm with exact known imports
+ *   2. For every candidate signal name, compute its FNV hash and call
+ *      setInputSignal() - success = signal exists, exception = doesn't
+ *   3. Collect all valid signals + their sizes via getInputSignalSize()
+ *   4. Generate a full proof with all signals set to 0 to confirm
  *
  * Usage:
  *   node scripts/discover-signals.mjs keeper
  *   node scripts/discover-signals.mjs stealer
- *   node scripts/discover-signals.mjs        # both
+ *   node scripts/discover-signals.mjs          # both
  */
 
-import { existsSync } from 'fs';
-
-const snarkjs = await import('snarkjs').then(m => m.default ?? m);
+import { readFileSync, existsSync } from 'fs';
 
 const CONFIGS = {
   keeper: {
     label: 'KEEPER (gatekeeper)',
     wasm: 'packages/alpines-keeper/circuits/gatekeeper.wasm',
     zkey: 'packages/alpines-keeper/circuits/gatekeeper_final.zkey',
-    nPublic: 13,
   },
   stealer: {
     label: 'STEALER (vfy-policy)',
     wasm: 'packages/alpines-stealer/circuits/steal.wasm',
     zkey: 'packages/alpines-stealer/circuits/steal_final.zkey',
-    nPublic: 9,
   },
 };
 
-async function discoverSignals(cfg) {
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`${cfg.label} - nPublic=${cfg.nPublic}`);
-  console.log('='.repeat(60));
+// ---- FNV-1a 32-bit (what circom uses) ----
+function fnv1a32(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
 
-  if (!existsSync(cfg.wasm)) { console.log('SKIP: wasm not found'); return; }
-  if (!existsSync(cfg.zkey)) { console.log('SKIP: zkey not found'); return; }
+// ---- FNV-1 64-bit split as [hMsb, hLsb] (alternate hash some circom versions use) ----
+function fnv164(str) {
+  let hLo = 2166136261, hHi = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    hLo ^= c;
+    // Multiply by FNV prime 16777619 as 64-bit
+    const lo = Math.imul(hLo, 16777619) >>> 0;
+    const hi = (Math.imul(hHi, 16777619) + Math.imul(hLo >>> 16, 256)) >>> 0;
+    hLo = lo; hHi = hi;
+  }
+  return [hHi >>> 0, hLo >>> 0]; // [MSB, LSB]
+}
 
-  const inputs = {};
-  let lastError = '';
+// ---- Build wasm instance with exact imports ----
+async function buildWasm(wasmPath) {
+  const buf = readFileSync(wasmPath);
+  const memory = new WebAssembly.Memory({ initial: 32767, maximum: 32767 });
+  const sharedRW = new Int32Array(memory.buffer);
+  let msgBuf = '';
 
-  for (let attempt = 0; attempt < 30; attempt++) {
+  const imports = {
+    env: { memory },
+    runtime: {
+      exceptionHandler(code) {
+        throw new Error(`WasmException:${code}`);
+      },
+      printErrorMessage() {
+        // Read null-terminated string from shared memory
+        let p = 0, str = '';
+        while (sharedRW[p] !== 0 && p < 1024) str += String.fromCharCode(sharedRW[p++]);
+        // Don't throw - just note it
+      },
+      writeBufferMessage() { msgBuf = ''; },
+      showSharedRWMemory() {},
+    },
+  };
+
+  const result = await WebAssembly.instantiate(buf, imports);
+  return { exp: result.instance.exports, memory, sharedRW };
+}
+
+// ---- Probe a single signal name ----
+function probeSignal(exp, name) {
+  // Try both 32-bit hash (single arg) and 64-bit hash (two args)
+  const h32 = fnv1a32(name);
+  const [hMsb, hLsb] = fnv164(name);
+
+  // getInputSignalSize: check if the signal exists and get its size
+  if (typeof exp.getInputSignalSize === 'function') {
     try {
-      const { proof, publicSignals } = await snarkjs.groth16.fullProve(inputs, cfg.wasm, cfg.zkey);
-      console.log('\nSUCCESS! Full proof generated!');
-      console.log('nPublic check: got', publicSignals.length, 'public signals (expected', cfg.nPublic, ')');
-      console.log('\nPublic signals:', JSON.stringify(publicSignals, null, 2));
-      console.log('\n*** WINNING INPUTS ***');
-      console.log(JSON.stringify(inputs, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
-      return inputs;
+      // Try with 32-bit hash (1 arg)
+      const size1 = exp.getInputSignalSize(h32);
+      if (size1 > 0 && size1 < 10000) return { exists: true, size: size1, hashType: 'fnv32' };
+    } catch {}
+    try {
+      // Try with 64-bit hash split (2 args: MSB, LSB)
+      const size2 = exp.getInputSignalSize(hMsb, hLsb);
+      if (size2 > 0 && size2 < 10000) return { exists: true, size: size2, hashType: 'fnv64' };
+    } catch {}
+  }
+
+  // Fallback: try setInputSignal with a zero value and see if it throws "not found"
+  if (typeof exp.setInputSignal === 'function') {
+    // Write 0 to shared RW memory position 0 (the value)
+    try {
+      exp.setInputSignal(h32, 0, 0);
+      return { exists: true, size: 1, hashType: 'fnv32-set' };
     } catch (e) {
-      const msg = e.message ?? String(e);
-      if (msg === lastError) { console.log('Stuck on same error, breaking'); break; }
-      lastError = msg;
-
-      // Pattern 1: "Signal X is not set"
-      let sigName = msg.match(/[Ss]ignal\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s+(?:is )?not set/)?.[1];
-      // Pattern 2: "Input signal X"
-      if (!sigName) sigName = msg.match(/[Ii]nput\s+(?:signal\s+)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s+(?:is )?not/)?.[1];
-      // Pattern 3: "not assigned" 
-      if (!sigName) sigName = msg.match(/"([a-zA-Z_][a-zA-Z0-9_]*)"\s+(?:was )?not (?:set|assigned)/)?.[1];
-      // Pattern 4: "Signal X" at start
-      if (!sigName) sigName = msg.match(/^Signal\s+([a-zA-Z_][a-zA-Z0-9_]*)/)?.[1];
-      // Pattern 5: "Too many values for input signal X" - it's array, set to [0]
-      const tooMany = msg.match(/Too many values for input signal ([a-zA-Z_][a-zA-Z0-9_]*)/)?.[1];
-
-      if (tooMany) {
-        // Find the right array size
-        console.log(`[${attempt+1}] "${tooMany}" is array type - finding size...`);
-        let sized = false;
-        for (const size of [1, 2, 8, 16, 32, 64, 128, 160, 254, 256]) {
-          try {
-            const testInputs = { ...inputs, [tooMany]: Array(size).fill(0) };
-            await snarkjs.groth16.fullProve(testInputs, cfg.wasm, cfg.zkey);
-            inputs[tooMany] = Array(size).fill(0);
-            console.log(`  -> "${tooMany}": array[${size}]`);
-            sized = true; break;
-          } catch(e2) {
-            const m2 = e2.message ?? '';
-            if (!m2.includes('Too many values')) {
-              inputs[tooMany] = Array(size).fill(0);
-              console.log(`  -> "${tooMany}": array[${size}] (accepted, other signals still needed)`);
-              sized = true; break;
-            }
-          }
-        }
-        if (!sized) { console.log(`  -> could not determine size for "${tooMany}"`); break; }
-      } else if (sigName) {
-        console.log(`[${attempt+1}] Missing signal: "${sigName}" -> setting to 0`);
-        inputs[sigName] = 0;
-      } else {
-        console.log(`[${attempt+1}] Unrecognized error:\n  ${msg.split('\n').slice(0,4).join('\n  ')}`);
-        break;
+      if (!e.message?.includes('WasmException')) {
+        try {
+          exp.setInputSignal(hMsb, hLsb, 0);
+          return { exists: true, size: 1, hashType: 'fnv64-set' };
+        } catch {}
       }
     }
   }
 
-  console.log('\nDiscovered inputs so far:', JSON.stringify(inputs, null, 2));
-  return inputs;
+  return { exists: false };
+}
+
+// ---- Exhaustive candidate list ----
+function getCandidates() {
+  return [
+    // Keeper / gatekeeper
+    'decision', 'approve', 'reject', 'valid', 'allow', 'gate', 'pass', 'result',
+    'amount', 'value', 'payment', 'transfer', 'sum', 'balance',
+    'recipient', 'to', 'receiver', 'address', 'addr', 'beneficiary',
+    'deadline', 'expiry', 'expiration', 'timeout', 'timestamp', 'ttl',
+    'min_amount', 'max_amount', 'minimum', 'maximum', 'threshold',
+    'rule_hash', 'policy_hash', 'nonce', 'salt', 'commitment', 'challenge',
+    'proof_hash', 'vk_hash', 'task_id', 'round',
+    // Stealer / vfy-policy
+    'action', 'move', 'choice', 'play', 'strategy', 'policy',
+    'turn', 'step', 'tick', 'phase', 'epoch',
+    'my_balance', 'opponent_balance', 'my_score', 'opponent_score',
+    'strategy_hash', 'commitment_hash', 'agent_hash', 'policy_commitment',
+    'total_turns', 'match_id', 'match_id_hash', 'player', 'opponent',
+    'fortify', 'extract', 'hold',
+    // Generic
+    'in', 'out', 'x', 'y', 'a', 'b', 'c', 'n', 'k', 'r', 's',
+    'input', 'output', 'signal', 'public_input', 'private_input',
+    // Indexed variants
+    ...Array.from({length: 20}, (_, i) => `in${i}`),
+    ...Array.from({length: 10}, (_, i) => `input${i}`),
+    ...Array.from({length: 5}, (_, i) => `amount${i}`),
+    ...Array.from({length: 5}, (_, i) => `hash${i}`),
+  ];
+}
+
+async function discoverSignals(cfg) {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(cfg.label);
+  console.log('='.repeat(60));
+
+  if (!existsSync(cfg.wasm)) { console.log('SKIP: wasm not found'); return null; }
+
+  // ---- Step 1: Instantiate wasm ----
+  let exp;
+  try {
+    const w = await buildWasm(cfg.wasm);
+    exp = w.exp;
+    console.log('Wasm loaded OK');
+    console.log('Exports:', Object.keys(exp).filter(k => typeof exp[k] === 'function').join(', '));
+  } catch (e) {
+    console.log('Wasm load error:', e.message);
+    return null;
+  }
+
+  // ---- Step 2: Init ----
+  try {
+    exp.init(0);
+    console.log('init(0) OK');
+  } catch(e) {
+    console.log('init error:', e.message);
+  }
+
+  // Query metadata
+  const inputSize = typeof exp.getInputSize === 'function' ? exp.getInputSize() : 'N/A';
+  const witnessSize = typeof exp.getWitnessSize === 'function' ? exp.getWitnessSize() : 'N/A';
+  console.log(`getInputSize()=${inputSize}  getWitnessSize()=${witnessSize}`);
+
+  // ---- Step 3: Probe all candidates ----
+  console.log('\nProbing signal names...');
+  const found = [];
+  for (const name of getCandidates()) {
+    const result = probeSignal(exp, name);
+    if (result.exists) {
+      found.push({ name, size: result.size, hashType: result.hashType });
+      console.log(`  FOUND: "${name}" (size=${result.size}, hash=${result.hashType})`);
+    }
+  }
+
+  if (found.length === 0) {
+    console.log('No signals found via hash probe. Falling back to snarkjs proof attempt...');
+  }
+
+  console.log(`\nTotal found: ${found.length} signal(s)`);
+  console.log('Signals:', found.map(f => `${f.name}[${f.size}]`).join(', '));
+
+  // ---- Step 4: Try generating a proof with discovered signals ----
+  if (found.length > 0 && existsSync(cfg.zkey)) {
+    const snarkjs = await import('snarkjs').then(m => m.default ?? m);
+    const inputs = {};
+    for (const { name, size } of found) {
+      inputs[name] = size === 1 ? 0 : Array(size).fill(0);
+    }
+    console.log('\nAttempting proof with discovered inputs:', JSON.stringify(inputs));
+    try {
+      const { proof, publicSignals } = await snarkjs.groth16.fullProve(inputs, cfg.wasm, cfg.zkey);
+      console.log('\n*** PROOF SUCCESS! ***');
+      console.log('nPublicSignals:', publicSignals.length);
+      console.log('publicSignals:', JSON.stringify(publicSignals));
+      console.log('\nWINNING INPUTS:');
+      console.log(JSON.stringify(inputs, null, 2));
+    } catch(e) {
+      console.log('Proof failed:', (e.message ?? '').split('\n')[0]);
+    }
+  }
+
+  return found;
 }
 
 const target = process.argv[2];
 const toRun = target ? [target] : Object.keys(CONFIGS);
-
 for (const name of toRun) {
-  if (!CONFIGS[name]) { console.error('Unknown:', name); process.exit(1); }
+  if (!CONFIGS[name]) { console.error('Unknown agent:', name); process.exit(1); }
   await discoverSignals(CONFIGS[name]);
 }
