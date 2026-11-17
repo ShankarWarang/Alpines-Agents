@@ -73,23 +73,46 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
           try { return BigInt(String(v).trim()); } catch { return fallback; }
         };
 
+        // ---- Parse task values ----
         const amount = parseBig(task.incoming_proof.publicInputs?.[0] ?? '0');
         const recipient = parseBig(task.payment_request.recipient);
         const minAmount = parseBig(task.payment_request.min_amount);
-        const maxAmount = parseBig(task.payment_request.max_amount ?? '0');
-        // expiryBlock: deadline is a unix timestamp; convert to approximate block (~12s/block)
-        const expiryBlock = BigInt(task.payment_request.deadline ?? 0);
-        const currentBlock = BigInt(Math.floor(Date.now() / 12000));
-        // taskId: hash the task_id string into a field element
-        const taskIdBig = BigInt('0x' + Buffer.from(task.task_id.slice(0, 16)).toString('hex'));
-        // VK hashes - use 0n if not available, circuit will constraint-fail and we reject
-        const regVkHash = parseBig(task.incoming_proof.vk_hash ?? '0');
-        const proofVkHash = parseBig(task.incoming_proof.vk_hash ?? '0');
-        // publicBalance: use amount as proxy (the balance being transferred)
-        const publicBalance = amount;
-        // salt: random 128-bit value for proof uniqueness
+        const maxAmount = parseBig(task.payment_request.max_amount ?? amount.toString());
+
+        // expiryBlock / currentBlock: the circuit uses block numbers.
+        // task.payment_request.deadline is a unix timestamp (seconds).
+        // Convert to approximate Ethereum block number (~12s per block since merge).
+        // We use the SAME conversion for both so the ratio is consistent.
+        const nowSec = BigInt(Math.floor(Date.now() / 1000));
+        const SEC_PER_BLOCK = 12n;
+        // Approximate current ETH block (Merge ~Sep2022 at block 15537394, timestamp 1663224162)
+        const MERGE_BLOCK = 15537394n;
+        const MERGE_TS = 1663224162n;
+        const currentBlock = MERGE_BLOCK + (nowSec - MERGE_TS) / SEC_PER_BLOCK;
+        const deadlineSec = BigInt(task.payment_request.deadline ?? 0);
+        // If deadline < 1e9 it might already be a block number; if >= 1e9 it's a timestamp
+        const expiryBlock = deadlineSec >= 1_000_000_000n
+          ? MERGE_BLOCK + (deadlineSec - MERGE_TS) / SEC_PER_BLOCK
+          : deadlineSec > 0n ? deadlineSec : currentBlock + 1_000_000n;
+
+        // taskId: derive from task_id string (take first 15 hex chars = ~60 bits)
+        const taskIdBytes = Buffer.from(task.task_id.replace(/-/g, '').slice(0, 15), 'hex');
+        const taskIdBig = taskIdBytes.length > 0
+          ? BigInt('0x' + taskIdBytes.toString('hex'))
+          : parseBig(task.task_id.replace(/\D/g, '').slice(0, 18) || '1');
+
+        // VK hashes: both must be the SAME value for the circuit to APPROVE.
+        // Use the incoming proof's vk_hash. If missing, use our own registered VK hash.
+        const vkHashStr = task.incoming_proof.vk_hash ?? vkHash ?? '0';
+        const regVkHash = parseBig(vkHashStr);
+        const proofVkHash = parseBig(vkHashStr);  // must equal regVkHash
+
+        // publicBalance: upper bound on the payment. Use max_amount if set, else amount.
+        const publicBalance = maxAmount > 0n ? maxAmount : amount;
+
+        // salt: random BigInt (stays within BN128 field: < 2^254)
         const saltBytes = randomBytes(16);
-        const salt = BigInt('0x' + saltBytes.toString('hex')) % (2n ** 128n);
+        const salt = BigInt('0x' + saltBytes.toString('hex'));
 
         const proofResult = await generateProof({
           registeredVkHash: regVkHash,

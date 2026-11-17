@@ -15,21 +15,32 @@ const CONFIGS = {
     label: 'KEEPER (gatekeeper)',
     wasm: 'packages/alpines-keeper/circuits/gatekeeper.wasm',
     zkey: 'packages/alpines-keeper/circuits/gatekeeper_final.zkey',
-    // All 13 confirmed signals with sample values
-    sampleInputs: {
-      registeredVkHash: '0',  // platform VK hash
-      proofVkHash: '0',       // incoming proof VK hash
-      minimum: '100',         // min payment amount
-      publicBalance: '5000',  // public balance
-      expiryBlock: '99999999', // deadline as block
-      currentBlock: String(Math.floor(Date.now() / 12000)),
-      recipient: '12345',     // recipient as integer
-      conditionRecipient: '12345', // must match recipient
-      amount: '500',          // payment amount
-      maxTransfer: '10000',   // max allowed transfer
-      decision: '1',          // 1=APPROVE
-      taskId: '999',          // task ID
-      salt: String(BigInt('0x' + randomBytes(16).toString('hex'))),
+    // All 13 confirmed signals with CONSTRAINT-SATISFYING values
+    // Key constraints the circuit enforces:
+    //   - registeredVkHash == proofVkHash
+    //   - recipient == conditionRecipient
+    //   - amount >= minimum, amount <= maxTransfer, amount <= publicBalance
+    //   - currentBlock <= expiryBlock (not expired)
+    //   - decision=1 requires all above to be true
+    sampleInputsFn: () => {
+      const currentBlock = Math.floor(Date.now() / 12000);
+      const vkHash = '54321'; // must match for APPROVE
+      const recipient = '12345';
+      return {
+        registeredVkHash: vkHash,  // must == proofVkHash
+        proofVkHash: vkHash,       // must == registeredVkHash
+        minimum: '100',
+        publicBalance: '5000',     // must >= amount
+        expiryBlock: String(currentBlock + 1000000), // must > currentBlock
+        currentBlock: String(currentBlock),
+        recipient: recipient,
+        conditionRecipient: recipient, // must == recipient
+        amount: '500',             // must be in [minimum, maxTransfer]
+        maxTransfer: '10000',
+        decision: '1',             // 1=APPROVE
+        taskId: '999',
+        salt: String(BigInt('0x' + randomBytes(16).toString('hex'))),
+      };
     },
   },
   stealer: {
@@ -69,10 +80,11 @@ for (const name of toRun) {
   try {
     const snarkjs = await import('snarkjs').then(m => m.default ?? m);
     console.log('Running fullProve with sample inputs...');
-    console.log('Inputs:', JSON.stringify(cfg.sampleInputs, null, 2));
+    const inputs = cfg.sampleInputsFn ? cfg.sampleInputsFn() : cfg.sampleInputs;
+    console.log('Inputs:', JSON.stringify(inputs, null, 2));
 
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-      cfg.sampleInputs, cfg.wasm, cfg.zkey
+      inputs, cfg.wasm, cfg.zkey
     );
     console.log('\n*** PROOF SUCCESS! ***');
     console.log('publicSignals:', JSON.stringify(publicSignals));
