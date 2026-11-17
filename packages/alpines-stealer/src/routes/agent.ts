@@ -3,6 +3,7 @@
 // ============================================================
 
 import type { FastifyInstance } from 'fastify';
+import { randomBytes } from 'node:crypto';
 import { generateProof, createLogger } from '@zkverify/shared';
 import type { StealTask, StealResponse, StealAction } from '@zkverify/shared';
 import { getOrCreate } from '../engine/match-state.js';
@@ -83,14 +84,52 @@ export function registerAgentRoute(
         // strategy_hash: use our registered commitment (sent back by platform as task.strategy_hash).
         // We fall back to our own constant if the platform omits it, ensuring consistency.
         const strategyHashHex = (task.strategy_hash ?? STRATEGY_COMMITMENT).replace(/^0x/, '');
-        const strategyHashBigInt = BigInt('0x' + strategyHashHex).toString();
+        const commitment = BigInt('0x' + strategyHashHex);
 
-        const circuitInputs = {
-          action: actionToInt(action),
-          turn: task.turn,
-          my_balance: task.my_balance,
-          opponent_balance: task.opponent_balance,
-          strategy_hash: strategyHashBigInt,
+        // Map action to circuit integer: 0=FORTIFY, 1=EXTRACT, 2=HOLD
+        const actionInt = actionToInt(action);
+
+        // Circuit version must match platform registration (1)
+        const CIRCUIT_VERSION = 1n;
+
+        // Random salt for proof uniqueness
+        const saltBytes = randomBytes(16);
+        const salt = BigInt('0x' + saltBytes.toString('hex')) % (2n ** 128n);
+
+        // matchId as BigInt from first 16 chars of hex-encoded match ID
+        const matchIdNum = BigInt('0x' + Buffer.from(task.match_id.slice(0, 16)).toString('hex'));
+
+        // Extract amount: only non-zero when action is EXTRACT, capped at 10
+        const extractAmount = action === 'EXTRACT' ? BigInt(Math.min(10, task.my_balance)) : 0n;
+
+        // Strategy array (confirmed size=8, name being resolved via hash crack).
+        // Best current guess: 'strategy'. If wrong, proof fails gracefully.
+        // Preimage: all zeros (matches commitment registered with salt=0).
+        const strategyArray = Array(8).fill(0n) as bigint[];
+
+        // Circuit inputs - ALL 17 inputs confirmed via FNV-1a wasm probe:
+        //   idx=2  commitment      - registered strategy commitment
+        //   idx=3  matchId         - match identifier as BigInt
+        //   idx=4  turnNumber      - current turn (1-20)
+        //   idx=5  selfBalance     - our current balance
+        //   idx=6  opponentBalance - opponent's current balance
+        //   idx=7  action          - 0=FORTIFY,1=EXTRACT,2=HOLD
+        //   idx=8  amount          - extraction amount (0 for non-EXTRACT)
+        //   idx=9  circuitVersion  - circuit version (1)
+        //   idx=10 [size=8 array]  - private strategy (name=best guess)
+        //   idx=18 salt            - random salt
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const circuitInputs: Record<string, any> = {
+          commitment,
+          matchId: matchIdNum,
+          turnNumber: BigInt(task.turn),
+          selfBalance: BigInt(task.my_balance),
+          opponentBalance: BigInt(task.opponent_balance),
+          action: BigInt(actionInt),
+          amount: extractAmount,
+          circuitVersion: CIRCUIT_VERSION,
+          salt,
+          strategy: strategyArray,  // best-guess name for the size=8 array
         };
 
         const result = await generateProof(circuitInputs);

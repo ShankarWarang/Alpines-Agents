@@ -1,18 +1,30 @@
 #!/usr/bin/env node
 /**
  * Automated circuit signal discovery using exact circom wasm API.
- * Instantiates wasm directly, probes signal names via FNV-1a hash,
- * then generates a proof to confirm.
+ * Instantiates wasm directly, probes signal names via FNV-1a hash.
+ *
+ * IMPORTANT: setInputSignal(h1, h0, pos) - h1 is HIGH 32 bits, h0 is LOW 32 bits.
+ * This is confirmed correct for both circuits.
  *
  * Usage:
  *   node scripts/discover-signals.mjs keeper
  *   node scripts/discover-signals.mjs stealer
+ *
+ * CONFIRMED KEEPER SIGNALS (all scalars, inputSize=13):
+ *   registeredVkHash, proofVkHash, minimum, publicBalance, expiryBlock,
+ *   currentBlock, recipient, conditionRecipient, amount, maxTransfer,
+ *   decision, taskId, salt
+ *
+ * CONFIRMED STEALER SIGNALS (inputSize=17):
+ *   commitment(1), matchId(1), turnNumber(1), selfBalance(1),
+ *   opponentBalance(1), action(1), amount(1), circuitVersion(1),
+ *   [unknown-name](8), salt(1)
  */
 
 import { readFileSync, existsSync } from 'fs';
 
-// ---- Exact circom FNV-1a 64-bit hash (from snarkjs witness_calculator.js) ----
-// setInputSignal(h0, h1, pos) where h0=harray[0], h1=harray[1]
+// ---- Exact circom FNV-1a 64-bit hash ----
+// setInputSignal(h1, h0, pos) - h1=high32, h0=low32
 function fnvHash(str) {
   const uint64_max = 2n ** 64n;
   let hash = 0xCBF29CE484222325n;
@@ -30,13 +42,43 @@ const CONFIGS = {
     label: 'KEEPER (gatekeeper)',
     wasm: 'packages/alpines-keeper/circuits/gatekeeper.wasm',
     zkey: 'packages/alpines-keeper/circuits/gatekeeper_final.zkey',
+    // ALL 13 signals confirmed
+    confirmed: [
+      'registeredVkHash','proofVkHash','minimum','publicBalance','expiryBlock',
+      'currentBlock','recipient','conditionRecipient','amount','maxTransfer',
+      'decision','taskId','salt',
+    ],
   },
   stealer: {
     label: 'STEALER (vfy-policy)',
     wasm: 'packages/alpines-stealer/circuits/steal.wasm',
     zkey: 'packages/alpines-stealer/circuits/steal_final.zkey',
+    // 9 of 10 signals confirmed (array name still unknown)
+    confirmed: [
+      'commitment','matchId','turnNumber','selfBalance','opponentBalance',
+      'action','amount','circuitVersion','salt',
+      // unknown size=8 array at idx=10, hash=0xc07a189808b648c2
+    ],
   },
 };
+
+// Extended candidate list for probing new signals
+const CANDIDATES = [
+  // Keeper confirmed
+  'registeredVkHash','proofVkHash','minimum','publicBalance','expiryBlock',
+  'currentBlock','recipient','conditionRecipient','amount','maxTransfer',
+  'decision','taskId','salt',
+  // Stealer confirmed
+  'commitment','matchId','turnNumber','selfBalance','opponentBalance',
+  'action','circuitVersion',
+  // Additional candidates to probe
+  'strategy','history','pathElements','policy','secret','private',
+  'strategyArray','strategyData','strategyBits','strategyWords',
+  'policyData','policyInputs','policyBits',
+  ...Array.from({length:16},(_,i)=>`in${i}`),
+  ...Array.from({length:8},(_,i)=>`input${i}`),
+  ...Array.from({length:8},(_,i)=>`hash${i}`),
+];
 
 async function buildWasm(wasmPath) {
   const buf = readFileSync(wasmPath);
@@ -60,27 +102,6 @@ function writeZero(exp, memory) {
   for (let i = 0; i < n32; i++) mem[(start >> 2) + i] = 0;
 }
 
-const CANDIDATES = [
-  // Keeper / gatekeeper
-  'decision','approve','reject','valid','allow','gate','pass','result','verdict',
-  'amount','value','payment','transfer','sum','price',
-  'recipient','to','receiver','address','addr','beneficiary','dest',
-  'deadline','expiry','expiration','timeout','timestamp','ttl','due',
-  'min_amount','max_amount','minimum','maximum','threshold','floor','cap',
-  'rule_hash','policy_hash','nonce','salt','commitment','challenge','seed',
-  // Stealer / vfy-policy
-  'action','move','choice','play','strategy','policy','step',
-  'turn','round','tick','phase','epoch','index','sequence',
-  'my_balance','opponent_balance','my_score','opponent_score','score','balance',
-  'strategy_hash','commitment_hash','agent_hash','policy_commitment',
-  'total_turns','match_id','match_id_hash','player','opponent','agent',
-  'fortify','extract','hold','attack','defend',
-  // Generic
-  'in','out','x','y','a','b','c','n','k','r','s',
-  ...Array.from({length:16},(_,i)=>`in${i}`),
-  ...Array.from({length:8},(_,i)=>`input${i}`),
-];
-
 async function discoverSignals(cfg) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(cfg.label);
@@ -95,47 +116,50 @@ async function discoverSignals(cfg) {
   const witnessSize = exp.getWitnessSize();
   console.log(`inputSize=${inputSize}  witnessSize=${witnessSize}`);
 
-  // ---- Probe each candidate ----
-  const found = [];
-  for (const name of CANDIDATES) {
-    const { h0, h1 } = fnvHash(name);
-    writeZero(exp, memory);
-    try {
-      exp.setInputSignal(h0, h1, 0);
-      // No throw = signal exists. Query its size.
-      let size = 1;
+  // Verify confirmed signals
+  if (cfg.confirmed?.length) {
+    console.log(`\nVerifying ${cfg.confirmed.length} confirmed signals:`);
+    for (const name of cfg.confirmed) {
+      const { h0, h1 } = fnvHash(name);
+      writeZero(exp, memory);
       try {
-        const s = exp.getInputSignalSize(h0, h1);
-        if (typeof s === 'number' && s > 0 && s < 10000) size = s;
-      } catch {}
-      found.push({ name, size });
-      process.stdout.write(`  FOUND: "${name}" size=${size}\n`);
-    } catch {
-      // Signal not found - expected for most names
+        exp.setInputSignal(h1, h0, 0);  // h1 first (high 32 bits), h0 second (low 32 bits)
+        let size = 1;
+        try {
+          const s = exp.getInputSignalSize(h1, h0);
+          if (typeof s === 'number' && s > 0 && s < 10000) size = s;
+        } catch {}
+        process.stdout.write(`  OK: "${name}" size=${size}\n`);
+      } catch(e) {
+        process.stdout.write(`  MISS: "${name}" (${e.message.slice(0,40)})\n`);
+      }
     }
   }
 
-  console.log(`\nTotal: ${found.length} signal(s) found`);
-  console.log('Signals:', found.map(f=>`${f.name}[${f.size}]`).join(', '));
-
-  // ---- Attempt proof ----
-  if (!existsSync(cfg.zkey)) { console.log('No zkey, skipping proof'); return; }
-
-  const snarkjs = await import('snarkjs').then(m => m.default ?? m);
-  const inputs = Object.fromEntries(
-    found.map(({name, size}) => [name, size === 1 ? 0 : Array(size).fill(0)])
-  );
-
-  console.log('\nAttempting proof with discovered inputs...');
-  try {
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(inputs, cfg.wasm, cfg.zkey);
-    console.log('\n*** PROOF SUCCESS! ***');
-    console.log('publicSignals:', JSON.stringify(publicSignals));
-    console.log('\nWINNING INPUTS:');
-    console.log(JSON.stringify(inputs, null, 2));
-  } catch(e) {
-    console.log('Proof attempt:', (e.message ?? '').split('\n')[0].slice(0, 120));
+  // Probe for additional signals
+  console.log('\nProbing for additional/unknown signals...');
+  const foundNew = [];
+  const confirmedSet = new Set(cfg.confirmed ?? []);
+  for (const name of CANDIDATES) {
+    if (confirmedSet.has(name)) continue;
+    const { h0, h1 } = fnvHash(name);
+    writeZero(exp, memory);
+    try {
+      exp.setInputSignal(h1, h0, 0);
+      let size = 1;
+      try {
+        const s = exp.getInputSignalSize(h1, h0);
+        if (typeof s === 'number' && s > 0 && s < 10000) size = s;
+      } catch {}
+      foundNew.push({ name, size });
+      process.stdout.write(`  NEW: "${name}" size=${size}\n`);
+    } catch {}
   }
+
+  if (foundNew.length === 0) console.log('  (no new signals found)');
+
+  const totalConfirmed = (cfg.confirmed?.length ?? 0) + foundNew.length;
+  console.log(`\nTotal signals found: ${totalConfirmed} / ${inputSize}`);
 }
 
 const target = process.argv[2];
