@@ -46,7 +46,7 @@ const CONFIGS = {
       action: '2',  // HOLD=2
       amount: '0',
       circuitVersion: '1',
-      strategy: Array(8).fill('0'),  // best-guess array name
+      strategyParams: Array(8).fill('0'),  // confirmed array name
       salt: String(BigInt('0x' + randomBytes(16).toString('hex'))),
     },
   },

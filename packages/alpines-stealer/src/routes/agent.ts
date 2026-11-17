@@ -129,7 +129,7 @@ export function registerAgentRoute(
           amount: extractAmount,
           circuitVersion: CIRCUIT_VERSION,
           salt,
-          strategy: strategyArray,  // best-guess name for the size=8 array
+          strategyParams: strategyArray,  // confirmed name for the size=8 array (all zeros = null strategy)
         };
 
         const result = await generateProof(circuitInputs);

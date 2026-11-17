@@ -57,7 +57,7 @@ const CONFIGS = {
     confirmed: [
       'commitment','matchId','turnNumber','selfBalance','opponentBalance',
       'action','amount','circuitVersion','salt',
-      // unknown size=8 array at idx=10, hash=0xc07a189808b648c2
+      'strategyParams',  // size=8 array confirmed
     ],
   },
 };
@@ -72,9 +72,7 @@ const CANDIDATES = [
   'commitment','matchId','turnNumber','selfBalance','opponentBalance',
   'action','circuitVersion',
   // Additional candidates to probe
-  'strategy','history','pathElements','policy','secret','private',
-  'strategyArray','strategyData','strategyBits','strategyWords',
-  'policyData','policyInputs','policyBits',
+  'strategyParams',  // already confirmed but kept for validation
   ...Array.from({length:16},(_,i)=>`in${i}`),
   ...Array.from({length:8},(_,i)=>`input${i}`),
   ...Array.from({length:8},(_,i)=>`hash${i}`),
