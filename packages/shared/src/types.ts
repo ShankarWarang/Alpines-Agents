@@ -102,9 +102,15 @@ export interface StealTask extends AgentRequest {
 
 export interface StealResponse {
   action: StealAction;
-  reason_code: string;
-  proof?: Groth16Proof;
-  public_signals?: string[];
+  idempotencyKey: string;
+  amount?: number;           // only for EXTRACT
+  policyProof?: {
+    circuitVersion: number;
+    proof: Groth16Proof;
+    public_signals: string[];
+    publicInputsHash?: string;
+    proofReference?: string;
+  };
 }
 
 export interface MatchState {
