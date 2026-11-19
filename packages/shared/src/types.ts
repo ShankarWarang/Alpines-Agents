@@ -146,8 +146,6 @@ export interface MatchState {
   opponentHistory: StealAction[];
   lastUpdated: number;
 }
-  lastUpdated: number;
-}
 
 // -- Strategy Types -----------------------------------------
 
