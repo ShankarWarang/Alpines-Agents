@@ -4,6 +4,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
+import { keccak256, concat, numberToHex } from 'viem';
 import { generateProof, createLogger } from '@zkverify/shared';
 import type { StealTask, StealResponse, StealAction } from '@zkverify/shared';
 import { getOrCreate } from '../engine/match-state.js';
@@ -32,6 +33,38 @@ function actionToInt(action: StealAction): number {
     case 'FORTIFY': return 1;
     case 'EXTRACT': return 2;
   }
+}
+
+/**
+ * Compute the publicInputsHash per the platform spec:
+ * keccak256 of ABI-packed fields (each padded to 32 bytes big-endian).
+ *
+ * This hash is what the platform independently verifies as public_signals[0].
+ * Without it matching, the proof is rejected before even running the verifier.
+ */
+function computePublicInputsHash(
+  commitment: bigint,
+  matchId: string,
+  turn: number,
+  selfBalance: number,
+  opponentBalance: number,
+  action: StealAction,
+  amount: number,
+): `0x${string}` {
+  // UUID has 32 hex chars without dashes (16 bytes) — fits safely in bytes32
+  const matchIdBig = BigInt('0x' + matchId.replace(/-/g, ''));
+  const actionNum = { HOLD: 0n, FORTIFY: 1n, EXTRACT: 2n }[action];
+
+  return keccak256(concat([
+    numberToHex(commitment,          { size: 32 }),  // strategyCommitment.hash
+    numberToHex(matchIdBig,          { size: 32 }),  // matchId as bytes32
+    numberToHex(BigInt(turn),        { size: 32 }),  // turn number
+    numberToHex(BigInt(selfBalance), { size: 32 }),  // selfBalance
+    numberToHex(BigInt(opponentBalance), { size: 32 }), // opponentBalance
+    numberToHex(actionNum,           { size: 32 }),  // action encoding
+    numberToHex(BigInt(amount),      { size: 32 }),  // amount (0 for HOLD/FORTIFY)
+    numberToHex(1n,                  { size: 32 }),  // circuitVersion "v1" → 1
+  ]));
 }
 
 export function registerAgentRoute(
@@ -85,6 +118,22 @@ export function registerAgentRoute(
       const action = selectAction(state);
       state.myHistory.push(action);
 
+      // -- Compute extract amount (0 for HOLD/FORTIFY) --
+      const extractAmt = action === 'EXTRACT' ? Math.min(10, myBalance) : 0;
+
+      // -- Compute publicInputsHash per platform spec --
+      // The platform independently computes this hash and rejects proofs that diverge.
+      // We MUST set public_signals[0] to this hash in all cases (valid proof or fallback).
+      const publicInputsHash = computePublicInputsHash(
+        STRATEGY_COMMITMENT,
+        task.matchId,
+        task.turn,
+        myBalance,
+        oppBalance,
+        action,
+        extractAmt,
+      );
+
       // -- Generate Groth16 proof --
       let proof: any = {
         pi_a: ['0', '0', '1'],
@@ -93,16 +142,16 @@ export function registerAgentRoute(
         protocol: 'groth16',
         curve: 'bn128',
       };
-      let publicSignals: string[] = ['0'];
+      // Always initialise publicSignals to the computed hash (platform pre-screen)
+      let publicSignals: string[] = [publicInputsHash];
       let proofValid = false;
 
       try {
         const actionInt    = actionToInt(action);
-        const extractAmt   = action === 'EXTRACT' ? BigInt(Math.min(10, myBalance)) : 0n;
+        const extractAmtBig = BigInt(extractAmt);
 
-        // matchId as BigInt (strip hyphens, take first 32 hex chars)
-        const matchHex  = task.matchId.replace(/-/g, '').slice(0, 32).padStart(32, '0');
-        const matchIdNum = BigInt('0x' + matchHex);
+        // matchId as BigInt — full UUID hex (32 hex chars = 16 bytes, fits in bytes32)
+        const matchIdNum = BigInt('0x' + task.matchId.replace(/-/g, ''));
 
         const circuitInputs: Record<string, string | number | bigint | (string | number | bigint)[]> = {
           commitment:      STRATEGY_COMMITMENT,
@@ -111,7 +160,7 @@ export function registerAgentRoute(
           selfBalance:     BigInt(myBalance),
           opponentBalance: BigInt(oppBalance),
           action:          BigInt(actionInt),
-          amount:          extractAmt,
+          amount:          extractAmtBig,
           circuitVersion:  CIRCUIT_VERSION_INT,
           salt:            STRATEGY_SALT,
           strategyParams:  STRATEGY_PARAMS,
@@ -119,13 +168,14 @@ export function registerAgentRoute(
 
         const result  = await generateProof(circuitInputs);
         proof         = result.proof;
-        publicSignals = result.publicSignals;
+        // Use the circuit's own public signals if proof succeeded
+        publicSignals = result.publicSignals.length > 0 ? result.publicSignals : [publicInputsHash];
         proofValid    = true;
         logger.info({ matchId: task.matchId, turn: task.turn }, 'Proof generated successfully');
       } catch (proofErr) {
         logger.error(
           { err: proofErr, matchId: task.matchId, turn: task.turn },
-          'Proof generation failed - using fallback zeroed proof (schema-valid, cryptographically invalid = -2)',
+          'Proof generation failed - sending zeroed proof with correct publicInputsHash',
         );
       }
 
