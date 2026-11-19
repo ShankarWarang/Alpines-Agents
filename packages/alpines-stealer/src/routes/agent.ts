@@ -21,10 +21,14 @@ const CIRCUIT_VERSION_INT = 1n;
  * Strategy params: all zeros.
  * Commitment = Poseidon([0,0,0,0,0,0,0,0], 0) = 0x01c4da168cbfb5014e1dc256d82ba808033c11cc3bd113ef0a44ad86b2075728
  * This must match the commitment registered on the Agent Games dashboard.
+ * Override via STEALER_STRATEGY_COMMITMENT env var if re-registered.
  */
 const STRATEGY_PARAMS = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n] as bigint[];
 const STRATEGY_SALT = 0n;
-const STRATEGY_COMMITMENT = BigInt('0x01c4da168cbfb5014e1dc256d82ba808033c11cc3bd113ef0a44ad86b2075728');
+const STRATEGY_COMMITMENT = BigInt(
+  process.env.STEALER_STRATEGY_COMMITMENT ??
+  '0x01c4da168cbfb5014e1dc256d82ba808033c11cc3bd113ef0a44ad86b2075728',
+);
 
 // Map action to circuit integer: 0=HOLD, 1=FORTIFY, 2=EXTRACT (per spec)
 function actionToInt(action: StealAction): number {
@@ -144,7 +148,6 @@ export function registerAgentRoute(
       };
       // Always initialise publicSignals to the computed hash (platform pre-screen)
       let publicSignals: string[] = [publicInputsHash];
-      let proofValid = false;
 
       try {
         const actionInt    = actionToInt(action);
@@ -170,7 +173,6 @@ export function registerAgentRoute(
         proof         = result.proof;
         // Use the circuit's own public signals if proof succeeded
         publicSignals = result.publicSignals.length > 0 ? result.publicSignals : [publicInputsHash];
-        proofValid    = true;
         logger.info({ matchId: task.matchId, turn: task.turn }, 'Proof generated successfully');
       } catch (proofErr) {
         logger.error(

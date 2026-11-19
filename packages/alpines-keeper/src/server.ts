@@ -64,16 +64,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     const rawBody = request.rawBody ?? '';
 
     const ok = verifyHmac(rawBody, signature);
-    // Debug log: show FULL signature + FULL body for secret-mismatch diagnosis
-    // TODO: remove fullSig/fullBody after HMAC is confirmed working
-    log.info({
-      url: request.url,
-      method: request.method,
-      fullSig: signature,
-      fullBody: rawBody,
-      bodyLen: rawBody.length,
-      hmacOk: ok,
-    }, 'HMAC check');
+    log.info(
+      { url: request.url, method: request.method, bodyLen: rawBody.length, hmacOk: ok },
+      'HMAC check',
+    );
 
     if (!ok) {
       return reply.code(401).send({ error: 'Invalid HMAC signature' });
