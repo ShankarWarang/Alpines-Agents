@@ -125,11 +125,11 @@ export interface StealResponse {
   matchId: string;
   turn: number;
   action: StealActionObject;
-  idempotencyKey: string;
+  idempotencyKey: string;   // must be a valid UUID v4
   agentTimestamp: string;
-  policyProof?: {
+  policyProof: {            // REQUIRED - always present, even if proof is invalid
     circuitVersion: 'v1';
-    proof: Groth16Proof;
+    proof: Groth16Proof | { pi_a: string[]; pi_b: string[][]; pi_c: string[]; protocol: string; curve: string };
     public_signals: string[];
     publicInputsHash?: string;
     proofReference?: string;

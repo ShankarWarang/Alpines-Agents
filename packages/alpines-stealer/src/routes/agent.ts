@@ -3,6 +3,7 @@
 // ============================================================
 
 import type { FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { generateProof, createLogger } from '@zkverify/shared';
 import type { StealTask, StealResponse, StealAction } from '@zkverify/shared';
 import { getOrCreate } from '../engine/match-state.js';
@@ -85,8 +86,15 @@ export function registerAgentRoute(
       state.myHistory.push(action);
 
       // -- Generate Groth16 proof --
-      let proof       = undefined;
-      let publicSignals = undefined;
+      let proof: any = {
+        pi_a: ['0', '0', '1'],
+        pi_b: [['0', '0'], ['0', '0'], ['1', '0']],
+        pi_c: ['0', '0', '1'],
+        protocol: 'groth16',
+        curve: 'bn128',
+      };
+      let publicSignals: string[] = ['0'];
+      let proofValid = false;
 
       try {
         const actionInt    = actionToInt(action);
@@ -112,11 +120,12 @@ export function registerAgentRoute(
         const result  = await generateProof(circuitInputs);
         proof         = result.proof;
         publicSignals = result.publicSignals;
+        proofValid    = true;
         logger.info({ matchId: task.matchId, turn: task.turn }, 'Proof generated successfully');
       } catch (proofErr) {
         logger.error(
           { err: proofErr, matchId: task.matchId, turn: task.turn },
-          'Proof generation failed - accepting -2 penalty',
+          'Proof generation failed - using fallback zeroed proof (schema-valid, cryptographically invalid = -2)',
         );
       }
 
@@ -143,17 +152,13 @@ export function registerAgentRoute(
         matchId: task.matchId,
         turn:    task.turn,
         action:  actionObj,
-        idempotencyKey: `${task.matchId}-${task.turn}`,
+        idempotencyKey: randomUUID(),   // proper UUID v4 per platform schema
         agentTimestamp: new Date().toISOString(),
-        ...(proof
-          ? {
-              policyProof: {
-                circuitVersion: CIRCUIT_VERSION,
-                proof,
-                public_signals: publicSignals as string[],
-              },
-            }
-          : {}),
+        policyProof: {
+          circuitVersion: CIRCUIT_VERSION,
+          proof,          // valid proof or zeroed fallback - always present
+          public_signals: publicSignals,
+        },
       };
 
       return response;
@@ -168,8 +173,13 @@ export function registerAgentRoute(
         matchId:        task.matchId ?? 'unknown',
         turn:           task.turn ?? 0,
         action:         { type: 'HOLD' },
-        idempotencyKey: `${task.matchId ?? 'unknown'}-${task.turn ?? 0}`,
+        idempotencyKey: randomUUID(),
         agentTimestamp: new Date().toISOString(),
+        policyProof: {
+          circuitVersion: CIRCUIT_VERSION,
+          proof: { pi_a: ['0', '0', '1'], pi_b: [['0', '0'], ['0', '0'], ['1', '0']], pi_c: ['0', '0', '1'], protocol: 'groth16', curve: 'bn128' },
+          public_signals: ['0'],
+        },
       } as StealResponse;
     }
   });
