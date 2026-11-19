@@ -131,7 +131,7 @@ export interface StealResponse {
     circuitVersion: 'v1';
     proof: Groth16Proof | { pi_a: string[]; pi_b: string[][]; pi_c: string[]; protocol: string; curve: string };
     public_signals: string[];
-    publicInputsHash?: string;
+    publicInputsHash: string;  // REQUIRED: keccak256 of ABI-packed game state (platform pre-screens this)
     proofReference?: string;
   };
 }

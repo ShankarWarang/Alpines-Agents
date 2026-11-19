@@ -210,6 +210,7 @@ export function registerAgentRoute(
           circuitVersion: CIRCUIT_VERSION,
           proof,          // valid proof or zeroed fallback - always present
           public_signals: publicSignals,
+          publicInputsHash: publicInputsHash,  // REQUIRED separate field (platform pre-screen)
         },
       };
 
@@ -221,6 +222,20 @@ export function registerAgentRoute(
         'Turn handler error - defaulting to HOLD',
       );
 
+      // Best-effort hash for the error fallback; HOLD=0, amount=0
+      let fallbackHash = '0x0000000000000000000000000000000000000000000000000000000000000000';
+      try {
+        fallbackHash = computePublicInputsHash(
+          STRATEGY_COMMITMENT,
+          task.matchId ?? '00000000-0000-0000-0000-000000000000',
+          task.turn ?? 0,
+          parseInt(task.state?.selfBalance ?? '100', 10),
+          parseInt(task.state?.opponentBalance ?? '100', 10),
+          'HOLD',
+          0,
+        );
+      } catch { /* use zeroed fallback */ }
+
       return {
         matchId:        task.matchId ?? 'unknown',
         turn:           task.turn ?? 0,
@@ -230,7 +245,8 @@ export function registerAgentRoute(
         policyProof: {
           circuitVersion: CIRCUIT_VERSION,
           proof: { pi_a: ['0', '0', '1'], pi_b: [['0', '0'], ['0', '0'], ['1', '0']], pi_c: ['0', '0', '1'], protocol: 'groth16', curve: 'bn128' },
-          public_signals: ['0'],
+          public_signals: [fallbackHash],
+          publicInputsHash: fallbackHash,
         },
       } as StealResponse;
     }
