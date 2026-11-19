@@ -65,17 +65,21 @@ export async function validateTask(
   // -- 3 & 4. Amount Checks ------------------------------------
   try {
     const amount    = BigInt(inp.amount    || '0');
+    const pubBal    = BigInt(inp.public_balance || '0');
     const minimum   = BigInt(inp.minimum   || '0');
     const maxXfer   = BigInt(inp.max_transfer || '0');
 
-    if (amount < minimum) {
+    // minimum = minimum PUBLIC BALANCE required (not minimum transfer amount)
+    // public_balance must be >= minimum for the payment to be valid
+    if (pubBal < minimum) {
       log.info(
-        { task_id: task.task_id, amount: amount.toString(), minimum: minimum.toString() },
-        'Amount below minimum',
+        { task_id: task.task_id, public_balance: pubBal.toString(), minimum: minimum.toString() },
+        'Public balance below minimum',
       );
       return { decision: 'REJECT', reason_code: 'AMOUNT_BELOW_MINIMUM' };
     }
 
+    // amount must not exceed max_transfer
     if (maxXfer > 0n && amount > maxXfer) {
       log.info(
         { task_id: task.task_id, amount: amount.toString(), max: maxXfer.toString() },
