@@ -5,90 +5,92 @@
  * - Sign every outbound response body and set x-agent-games-signature header.
  * - Uses timing-safe comparison to prevent timing attacks.
  *
- * Key-encoding auto-detection order:
- *   1. 64 hex chars (32-byte key) -> decoded as hex
- *   2. base64 string with valid base64 chars -> decoded as base64
- *   3. fallback -> treated as raw UTF-8
- *
- * Signature format tolerance:
- *   - Plain hex:         "abc123..."
- *   - Prefixed hex:      "sha256=abc123..." (webhook convention)
+ * Key-encoding: verification tries all three common encodings (UTF-8, hex, base64)
+ * so it works regardless of how the platform formats its secret token.
+ * Signing uses UTF-8 (raw string) which is the platform's convention.
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-let cachedKeyBuffer: Buffer | null = null;
+let cachedSecret = '';
 
 /**
  * Initialize the HMAC module with the shared secret.
- * Call once at startup - caches the key buffer for performance.
- *
- * Auto-detects key encoding:
- *   - 64 lowercase/uppercase hex chars -> decoded as hex (32-byte key)
- *   - Valid base64 string              -> decoded as base64
- *   - Everything else                  -> treated as UTF-8
+ * Call once at startup.
  */
 export function initHmac(secret: string): void {
-  const trimmed = secret.trim();
-
-  if (trimmed.length === 64 && /^[0-9a-fA-F]+$/.test(trimmed)) {
-    // 64 hex chars = 32 raw bytes - most common for Agent Games
-    cachedKeyBuffer = Buffer.from(trimmed, 'hex');
-  } else if (trimmed.length % 4 === 0 && /^[A-Za-z0-9+/]+=*$/.test(trimmed)) {
-    // base64-encoded key (e.g. 44 chars = 32 bytes, 88 chars = 64 bytes)
-    cachedKeyBuffer = Buffer.from(trimmed, 'base64');
-  } else {
-    // Raw UTF-8 string key
-    cachedKeyBuffer = Buffer.from(trimmed, 'utf-8');
-  }
+  cachedSecret = secret.trim();
 }
 
 /**
- * Compute HMAC-SHA256 signature of a payload.
- * Returns lowercase hex string.
+ * Returns all plausible key buffers to try when verifying.
+ * Platform may use the secret as raw UTF-8, hex-decoded, or base64-decoded.
+ */
+function getKeyVariants(): Buffer[] {
+  const s = cachedSecret;
+  const variants: Buffer[] = [];
+  // 1. Raw UTF-8 — most common for randomly-generated tokens
+  variants.push(Buffer.from(s, 'utf8'));
+  // 2. Hex-decoded (e.g. 64-char hex -> 32 bytes)
+  if (s.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(s)) {
+    variants.push(Buffer.from(s, 'hex'));
+  }
+  // 3. Base64-decoded
+  try {
+    const decoded = Buffer.from(s, 'base64');
+    if (decoded.length > 0) variants.push(decoded);
+  } catch { /* ignore */ }
+  return variants;
+}
+
+/**
+ * Compute HMAC-SHA256 signature of a payload using the primary key (raw UTF-8).
+ * Returns lowercase hex string — used for SIGNING outbound responses.
  */
 export function signHmac(body: string | Buffer): string {
-  if (!cachedKeyBuffer) {
+  if (!cachedSecret) {
     throw new Error('HMAC not initialized - call initHmac() at startup');
   }
-  return createHmac('sha256', cachedKeyBuffer)
+  const keyBuf = Buffer.from(cachedSecret, 'utf8');
+  return createHmac('sha256', keyBuf)
     .update(body)
     .digest('hex');
 }
 
 /**
  * Verify an HMAC-SHA256 signature using timing-safe comparison.
+ * Tries all key encoding variants (UTF-8, hex-decoded, base64-decoded).
  *
  * Accepts:
  *   - Plain hex signature:    "abc123..."
  *   - Prefixed signature:     "sha256=abc123..."
  *
- * Returns true if the signature matches, false otherwise.
+ * Returns true if any variant matches, false otherwise.
  */
 export function verifyHmac(body: string | Buffer, signature: string): boolean {
-  if (!cachedKeyBuffer) {
+  if (!cachedSecret) {
     throw new Error('HMAC not initialized - call initHmac() at startup');
   }
 
-  // Strip optional "sha256=" prefix (webhook convention used by GitHub, Stripe, etc.)
+  // Strip optional "sha256=" prefix
   const normalizedSig = signature.startsWith('sha256=')
     ? signature.slice(7)
     : signature;
 
-  const computed = signHmac(body);
-
-  // Guard: if signature is not valid hex, comparison will always fail safely
+  // Guard: if signature is not valid hex, reject safely
   if (!/^[0-9a-fA-F]+$/.test(normalizedSig)) {
     return false;
   }
 
   const sigBuf = Buffer.from(normalizedSig, 'hex');
-  const compBuf = Buffer.from(computed, 'hex');
 
-  // Length mismatch -> reject (timingSafeEqual requires equal lengths)
-  if (sigBuf.length !== compBuf.length) {
-    return false;
+  for (const keyBuf of getKeyVariants()) {
+    const computed = createHmac('sha256', keyBuf).update(body).digest('hex');
+    const compBuf = Buffer.from(computed, 'hex');
+    if (sigBuf.length === compBuf.length && timingSafeEqual(compBuf, sigBuf)) {
+      return true;
+    }
   }
 
-  return timingSafeEqual(compBuf, sigBuf);
+  return false;
 }

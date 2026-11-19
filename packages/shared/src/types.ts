@@ -42,25 +42,29 @@ export interface PreflightResponse {
 
 // -- Proof Gatekeeper Types ---------------------------------
 
-export interface GatekeeperPaymentRequest {
-  recipient: string;
-  min_amount: string;
-  max_amount?: string;
-  deadline: number;
-  rule_hash?: string;
-}
+// -- Proof Gatekeeper Types ---------------------------------
 
-export interface GatekeeperIncomingProof {
-  proof: Groth16Proof;
-  publicInputs: string[];
-  proof_tx?: string;
-  vk_hash?: string;
-  proving_system?: string;
+export interface GatekeeperInput {
+  registered_vk: string;        // VK hash registered on platform
+  proof_vk: string;             // VK hash from the submitted proof
+  minimum: string;              // minimum payment amount (decimal string)
+  public_balance: string;       // public balance context (decimal string)
+  expiry_block: number;         // block number at which payment expires
+  current_block: number;        // current block number (provided by platform)
+  recipient: string;            // expected payment recipient address
+  condition_recipient: string;  // condition recipient (must match recipient for APPROVE)
+  amount: string;               // payment amount (decimal string)
+  max_transfer: string;         // max allowed transfer amount (decimal string)
+  proof_tx: string;             // on-chain tx hash of the submitted proof
 }
 
 export interface GatekeeperTask extends AgentRequest {
-  payment_request: GatekeeperPaymentRequest;
-  incoming_proof: GatekeeperIncomingProof;
+  type: string;         // "agent-games.proof-gatekeeper.v1"
+  task_id: string;
+  mode: string;
+  issued_at: string;
+  deadline_at: string;
+  input: GatekeeperInput;
 }
 
 export type GatekeeperDecision = 'APPROVE' | 'REJECT';
@@ -81,23 +85,35 @@ export type GatekeeperReasonCode =
 export interface GatekeeperResponse {
   decision: GatekeeperDecision;
   reason_code: GatekeeperReasonCode;
-  proof?: Groth16Proof;
-  public_signals?: string[];
-  proof_tx?: string;
+  proof_tx?: string;  // echo input.proof_tx back to platform
 }
 
 // -- Steal the VFY Types ------------------------------------
 
 export type StealAction = 'FORTIFY' | 'EXTRACT' | 'HOLD';
 
+export interface StealGameState {
+  selfBalance: string;              // current balance as decimal string
+  opponentBalance: string;
+  selfFortifiedUntilTurn: number | null;
+  opponentFortifiedUntilTurn: number | null;
+}
+
 export interface StealTask extends AgentRequest {
-  match_id: string;
+  protocolVersion: string;          // "v1"
+  eventId: string;                  // "steal-the-vfy"
+  mode: string;
+  matchId: string;
   turn: number;
-  total_turns: number;
-  my_balance: number;
-  opponent_balance: number;
+  issuedAt: string;
+  deadlineAt: string;
+  state: StealGameState;
+  strategyCommitment: { hash: string };
+  resolverVersion: string;
+  nonce: string;
+  // Legacy / optional fields kept for compatibility
+  total_turns?: number;
   opponent_last_action?: StealAction;
-  strategy_hash?: string;
 }
 
 export interface StealActionObject {
@@ -110,8 +126,9 @@ export interface StealResponse {
   turn: number;
   action: StealActionObject;
   idempotencyKey: string;
+  agentTimestamp: string;
   policyProof?: {
-    circuitVersion: 'v1';    // string, not number
+    circuitVersion: 'v1';
     proof: Groth16Proof;
     public_signals: string[];
     publicInputsHash?: string;
@@ -127,6 +144,8 @@ export interface MatchState {
   opponentBalance: number;
   myHistory: StealAction[];
   opponentHistory: StealAction[];
+  lastUpdated: number;
+}
   lastUpdated: number;
 }
 

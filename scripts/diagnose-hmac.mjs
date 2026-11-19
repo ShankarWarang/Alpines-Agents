@@ -81,7 +81,7 @@ function tryAll(label, secret, body, expectedSig) {
     for (const tv of trimVariants) {
       for (const enc of ['utf8', 'hex', 'base64']) {
         try {
-          const kbuf = Buffer.from(tv, enc as BufferEncoding);
+          const kbuf = Buffer.from(tv, enc);
           const c = createHmac('sha256', kbuf).update(body).digest('hex');
           if (c === expectedSig) {
             console.log(`  *** MATCH: enc=${enc} variant="${tv.slice(0,8)}..." ***`);
