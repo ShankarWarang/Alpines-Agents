@@ -96,7 +96,7 @@ export function registerAgentRoute(
         const matchHex  = task.matchId.replace(/-/g, '').slice(0, 32).padStart(32, '0');
         const matchIdNum = BigInt('0x' + matchHex);
 
-        const circuitInputs: Record<string, unknown> = {
+        const circuitInputs: Record<string, string | number | bigint | (string | number | bigint)[]> = {
           commitment:      STRATEGY_COMMITMENT,
           matchId:         matchIdNum,
           turnNumber:      BigInt(task.turn),
