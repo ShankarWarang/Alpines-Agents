@@ -10,9 +10,12 @@ import { getOrCreateModel } from '../engine/opponent.js';
 import { selectAction } from '../engine/strategy.js';
 
 /**
- * Circuit version registered on platform.
+ * Circuit version string registered on platform dashboard.
+ * Used in policyProof.circuitVersion field of the HTTP response.
+ * Also maps to integer 1 for the circuit input signal circuitVersion.
  */
-const CIRCUIT_VERSION = 1;
+const CIRCUIT_VERSION = 'v1' as const;
+const CIRCUIT_VERSION_INT = 1n; // BigInt for circuit signal input
 
 /**
  * Strategy params: [p0, p1, 0, 0, 0, 0, 0, 0]
@@ -35,12 +38,12 @@ const STRATEGY_PARAMS = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n] as bigint[];
 // CHANGE THIS to match whatever salt was used at registration.
 const STRATEGY_SALT = 0n;
 
-// Map action to circuit integer
+// Map action to circuit integer: 0=HOLD, 1=FORTIFY, 2=EXTRACT (per spec publicInputsHash ordering)
 function actionToInt(action: StealAction): number {
   switch (action) {
-    case 'FORTIFY': return 0;
-    case 'EXTRACT': return 1;
-    case 'HOLD':    return 2;
+    case 'HOLD':    return 0;
+    case 'FORTIFY': return 1;
+    case 'EXTRACT': return 2;
   }
 }
 
@@ -100,7 +103,7 @@ export function registerAgentRoute(
         // If re-registration is needed, run scripts/compute-commitment.mjs to get the value.
         const commitment = BigInt('0x01c4da168cbfb5014e1dc256d82ba808033c11cc3bd113ef0a44ad86b2075728');
 
-        // Map action to circuit integer: 0=FORTIFY, 1=EXTRACT, 2=HOLD
+        // Map action to circuit integer: 0=HOLD, 1=FORTIFY, 2=EXTRACT
         const actionInt = actionToInt(action);
 
         // Fixed salt matching the registered commitment
@@ -112,17 +115,17 @@ export function registerAgentRoute(
         // Extract amount: only non-zero when action is EXTRACT, capped at 10
         const extractAmount = action === 'EXTRACT' ? BigInt(Math.min(10, task.my_balance)) : 0n;
 
-        // Circuit inputs - ALL 17 inputs confirmed via FNV-1a wasm probe:
-        //   idx=2  commitment      - registered strategy commitment
-        //   idx=3  matchId         - match identifier as BigInt
-        //   idx=4  turnNumber      - current turn (1-20)
-        //   idx=5  selfBalance     - our current balance
-        //   idx=6  opponentBalance - opponent's current balance
-        //   idx=7  action          - 0=FORTIFY,1=EXTRACT,2=HOLD
-        //   idx=8  amount          - extraction amount (0 for non-EXTRACT)
-        //   idx=9  circuitVersion  - circuit version (1)
-        //   idx=10 [size=8 array]  - private strategy (name=best guess)
-        //   idx=18 salt            - random salt
+        // Circuit inputs (confirmed via FNV-1a wasm probe):
+        //   commitment      - registered strategy commitment (Poseidon of params+salt)
+        //   matchId         - match identifier as BigInt
+        //   turnNumber      - current turn (1-20)
+        //   selfBalance     - our current balance
+        //   opponentBalance - opponent's current balance
+        //   action          - 0=HOLD, 1=FORTIFY, 2=EXTRACT
+        //   amount          - extraction amount (0 for HOLD/FORTIFY)
+        //   circuitVersion  - 1
+        //   strategyParams  - [8 BigInts] private strategy array
+        //   salt            - fixed salt (must match commitment)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const circuitInputs: Record<string, any> = {
           commitment,
@@ -132,7 +135,7 @@ export function registerAgentRoute(
           opponentBalance: BigInt(task.opponent_balance),
           action: BigInt(actionInt),
           amount: extractAmount,
-          circuitVersion: BigInt(CIRCUIT_VERSION),
+          circuitVersion: CIRCUIT_VERSION_INT,
           salt,
           strategyParams: STRATEGY_PARAMS,  // all-zeros array matching commitment
         };
@@ -163,8 +166,15 @@ export function registerAgentRoute(
         'Turn completed',
       );
 
+      // Build action object per spec: { type, amount? } — omit amount for HOLD/FORTIFY
+      const actionObj = action === 'EXTRACT'
+        ? { type: action, amount: Math.min(10, task.my_balance) }
+        : { type: action };
+
       const response: StealResponse = {
-        action,
+        matchId: task.match_id,
+        turn: task.turn,
+        action: actionObj,
         idempotencyKey: `${task.match_id}-${task.turn}`,
         ...(proof
           ? {
@@ -174,10 +184,6 @@ export function registerAgentRoute(
                 public_signals: publicSignals as string[],
               },
             }
-          : {}),
-        // Include amount only for EXTRACT
-        ...(action === 'EXTRACT'
-          ? { amount: Math.min(10, task.my_balance) }
           : {}),
       };
 
@@ -190,7 +196,9 @@ export function registerAgentRoute(
       );
 
       return {
-        action: 'HOLD',
+        matchId: task.match_id ?? 'unknown',
+        turn: task.turn ?? 0,
+        action: { type: 'HOLD' },
         idempotencyKey: `${task.match_id ?? 'unknown'}-${task.turn ?? 0}`,
       } as StealResponse;
     }

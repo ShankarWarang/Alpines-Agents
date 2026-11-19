@@ -100,12 +100,18 @@ export interface StealTask extends AgentRequest {
   strategy_hash?: string;
 }
 
+export interface StealActionObject {
+  type: StealAction;
+  amount?: number;  // only present for EXTRACT; omit for HOLD/FORTIFY
+}
+
 export interface StealResponse {
-  action: StealAction;
+  matchId: string;
+  turn: number;
+  action: StealActionObject;
   idempotencyKey: string;
-  amount?: number;           // only for EXTRACT
   policyProof?: {
-    circuitVersion: number;
+    circuitVersion: 'v1';    // string, not number
     proof: Groth16Proof;
     public_signals: string[];
     publicInputsHash?: string;
